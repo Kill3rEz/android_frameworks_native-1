@@ -730,6 +730,10 @@ status_t HWComposer::presentAndGetReleaseFences(
     return NO_ERROR;
 }
 
+bool HWComposer::isLayerCommandBatchingEnabled() const {
+    return mComposer->isLayerCommandBatchingEnabled();
+}
+
 status_t HWComposer::executeCommands(HalDisplayId displayId) {
     RETURN_IF_INVALID_DISPLAY(displayId, BAD_INDEX);
 
