@@ -1540,8 +1540,11 @@ void SurfaceFlinger::setDesiredMode(display::DisplayModeRequest desiredMode) {
             break;
     }
 
+    // QTI_BEGIN
     mQtiSFExtnIntf->qtiSetContentFps(mode.fps.getValue());
     mQtiSFExtnIntf->qtiDolphinSetVsyncPeriod(mode.fps.getPeriodNsecs());
+    mQtiSFExtnIntf->qtiUpdateVsyncConfiguration();
+    // QTI_END
 }
 
 status_t SurfaceFlinger::setActiveModeFromBackdoor(const sp<display::DisplayToken>& displayToken,
@@ -1844,7 +1847,14 @@ void SurfaceFlinger::initiateDisplayModeChanges() {
             // setActiveConfig doesn't properly support seamless requirement.
             constraints.seamlessRequired = false;
         } else {
-            constraints.seamlessRequired = initialDesiredMode.seamless;
+            // QTI_BEGIN
+            // Restrict seamless mode switch for modes in the same config group
+            const auto activeMode = mDisplayModeController.getActiveMode(initialDisplayId);
+            const bool sameGroup =
+                    activeMode.modePtr->getGroup() == initialDesiredMode.mode.modePtr->getGroup();
+            // QTI_END
+            constraints.seamlessRequired =
+                    initialDesiredMode.seamless /* QTI_BEGIN */ && sameGroup; /* QTI_END */
         }
 
         hal::VsyncPeriodChangeTimeline outTimeline;
@@ -3415,7 +3425,11 @@ bool SurfaceFlinger::commit(PhysicalDisplayId pacesetterId,
 
     persistDisplayBrightness(mustComposite);
 
+// QTI_BEGIN: 2026-04-20: Display: sfext: Change thermal fps caching logic
     mQtiSFExtnIntf->qtiSendCompositorTid();
+
+    mQtiSFExtnIntf->qtiDisallowThermalFpsChange();
+// QTI_END: 2026-04-20: Display: sfext: Change thermal fps caching logic
 
     return mustComposite && CC_LIKELY(mBootStage != BootStage::BOOTLOADER);
 }
@@ -3896,10 +3910,16 @@ void SurfaceFlinger::setForcedClientCompositionLayerStacks(
     bool forceAllDisplaysToClientComposition = false;
     if (mDebugDisableHWC) {
         forceAllDisplaysToClientComposition = true;
+        // QTI_BEGIN
+        refreshArgs.mQtiEnforceGpuComp = true;
+        // QTI_END
     }
 
     if (mDebugFlashDelay != 0) {
         forceAllDisplaysToClientComposition = true;
+        // QTI_BEGIN
+        refreshArgs.mQtiEnforceGpuComp = true;
+        // QTI_END
         refreshArgs.devOptFlashDirtyRegionsDelay = std::chrono::milliseconds(mDebugFlashDelay);
     }
 
@@ -3946,8 +3966,12 @@ bool SurfaceFlinger::isHdrLayer(const frontend::LayerSnapshot& snapshot) const {
             ? std::make_optional(static_cast<ui::PixelFormat>(snapshot.buffer->getPixelFormat()))
             : std::nullopt;
 
-    if (getHdrRenderType(snapshot.dataspace, pixelFormat, snapshot.desiredHdrSdrRatio) !=
-        HdrRenderType::SDR) {
+    ftl::Flags<HdrMetadataOptions> hdrOptions;
+    if (snapshot.hdrMetadata.validTypes != 0) hdrOptions |= HdrMetadataOptions::HasHdrMetadata;
+    if (snapshot.agtm.has_value()) hdrOptions |= HdrMetadataOptions::HasSmpte2094_50;
+
+    if (getHdrRenderType(snapshot.dataspace, pixelFormat, snapshot.desiredHdrSdrRatio,
+                         hdrOptions) != HdrRenderType::SDR) {
         return true;
     }
     // If the layer is not allowed to be dimmed, treat it as HDR. WindowManager may disable
@@ -4151,6 +4175,15 @@ void SurfaceFlinger::onCompositionPresented(PhysicalDisplayId pacesetterId,
 
         std::swap(activePictureListenersToAdd, mActivePictureListenersToAdd);
         std::swap(activePictureListenersToRemove, mActivePictureListenersToRemove);
+    }
+
+    if (!mHdrLayerInfoChanged) {
+        mLayerSnapshotBuilder.forEachVisibleSnapshot(
+                [&](std::unique_ptr<frontend::LayerSnapshot>& snapshot) {
+                    if (snapshot->agtm.has_value()) {
+                        mHdrLayerInfoChanged = true;
+                    }
+                });
     }
 
     if (haveNewHdrInfoListeners || mHdrLayerInfoChanged) {
@@ -5203,12 +5236,6 @@ void SurfaceFlinger::processDisplayChanged(const wp<IBinder>& displayToken,
     }
 }
 
-void SurfaceFlinger::resetPhaseConfiguration(Fps refreshRate) {
-// QTI_BEGIN: 2023-01-17: Display: sf: Introduce QTI Extensions in AOSP
-    mQtiSFExtnIntf->qtiUpdateVsyncConfiguration();
-// QTI_END: 2023-01-17: Display: sf: Introduce QTI Extensions in AOSP
-}
-
 void SurfaceFlinger::processDisplayChangesLocked() {
     const auto& currentDisplays = mCurrentState.displays;
     const auto& drawingDisplays = mDrawingState.displays;
@@ -5234,6 +5261,9 @@ void SurfaceFlinger::processDisplayChangesLocked() {
     }
 
     mDrawingState.displays = mCurrentState.displays;
+    // QTI_BEGIN
+    mQtiSFExtnIntf->qtiUpdateVsyncConfiguration();
+    // QTI_END
 }
 
 void SurfaceFlinger::commitTransactionsLocked(uint32_t transactionFlags) {
